@@ -7,6 +7,15 @@
     
     <div class="auth-form card">
         <h2>Hesabına Giriş Yap</h2>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="alert alert-{{ category }}" style="padding: 10px; margin-bottom: 15px; border-radius: 5px; color: white; background-color: {% if category == 'danger' %}#e74c3c{% else %}#2ecc71{% endif %};">
+                {{ message }}
+              </div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
         <form method="POST" action="{{ url_for('login') }}">
             <label for="username">Kullanıcı Adı:</label>
             <input type="text" id="username" name="username" required>

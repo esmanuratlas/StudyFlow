@@ -1,5 +1,6 @@
 from flask import Flask, render_template, flash, request, redirect, url_for, session, jsonify
-import pymysql.cursors
+import sqlite3
+import os
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
@@ -10,23 +11,18 @@ app = Flask(__name__)
 app.secret_key = "StudyFlow_2025_secret_key"
 
 # Veritabanı bağlantı ayarları
-DB_SETTINGS = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': '',
-    'database': 'studyflow_db',
-    'charset': 'utf8mb4',
-    'cursorclass': pymysql.cursors.DictCursor
-}
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR,"studyflow.db")
 
 # Veritabanı bağlantısı için context manager
 @contextmanager
 def get_db_connection():
     connection = None
     try:
-        connection = pymysql.connect(**DB_SETTINGS)
+        connection = sqlite3.connect(DB_PATH)
+        connection.row_factory = sqlite3.Row
         yield connection
-    except pymysql.Error as e:
+    except sqlite3.Error as e:
         print(f"Veritabanı bağlantı hatası: {e}")
         raise
     finally:
@@ -63,17 +59,17 @@ def register():
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                sql = "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s)"
+                sql = "INSERT INTO users (username, email, password_hash) VALUES (?,?,?)"
                 cursor.execute(sql, (username, email, password_hash))
                 conn.commit()
             flash("Hesabınız başarıyla oluşturuldu! Lütfen giriş yapın.", "success")
             return redirect(url_for('login'))
 
-        except pymysql.err.IntegrityError as e:
+        except sqlite3.IntegrityError :
             if e.args[0] == 1062:
                 return "Bu kullanıcı adı veya e-posta zaten kullanımda.", 409
             return f"Veritabanı bütünlük hatası: {e}", 500
-        except pymysql.Error as e:
+        except sqlite3.Error as e:
             return f"Veritabanı hatası: {e}", 500
         except Exception as e:
             return f"Beklenmedik hata: {e}", 500
@@ -90,11 +86,12 @@ def login():
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                sql = "SELECT id, username, password_hash FROM users WHERE username = %s"
+                sql = "SELECT id, username, password_hash FROM users WHERE username = ?"
                 cursor.execute(sql, (username,))
                 user = cursor.fetchone()
-        except pymysql.Error as e:
-            return f"Veritabanı hatası: {e}", 500
+        except sqlite3.Error as e:
+            flash(f"Veritabanı hatası oluştu: {e}","danger")
+            return render_template("login.html")
 
         if user and check_password_hash(user['password_hash'], password):
             session['logged_in'] = True
@@ -103,7 +100,8 @@ def login():
             flash("Giriş başarıyla tamamlandı!", "success")
             return redirect(url_for('dashboard'))
         else:
-            return "Hata: Kullanıcı adı veya parola hatalı.", 401
+            flash("Kullanıcı adı veya parola hatalı!","danger")
+            return render_template("login.html")
 
     return render_template('login.html')
 
@@ -143,20 +141,20 @@ def dashboard():
             cursor = conn.cursor()
 
             # Otomatik Temizlik
-            sql_clean_plans = "DELETE FROM weekly_plans WHERE user_id = %s AND week_start_date < %s"
+            sql_clean_plans = "DELETE FROM weekly_plans WHERE user_id = ? AND week_start_date < ?"
             cursor.execute(sql_clean_plans, (user_id, week_start_date))
 
             # ESKİ KANBAN GÖREVLERİNİ SİL (30 Günlük Arşiv):
-            sql_clean_tasks = "DELETE FROM kanban_tasks WHERE user_id = %s AND status = 'DONE' AND completed_at < DATE_SUB(NOW(), INTERVAL 30 DAY)"
+            sql_clean_tasks = "DELETE FROM kanban_tasks WHERE user_id = ? AND status = 'DONE' AND completed_at < DATE_SUB(NOW(), INTERVAL 30 DAY)"
             cursor.execute(sql_clean_tasks, (user_id,))
 
             # ÇALIŞMA SEANSLARINI SİL (60 Gün)
-            sql_clean_sessions = "DELETE FROM study_sessions WHERE user_id = %s AND start_time < DATE_SUB(NOW(), INTERVAL 60 DAY)"
+            sql_clean_sessions = "DELETE FROM study_sessions WHERE user_id = ? AND start_time < DATE_SUB(NOW(), INTERVAL 60 DAY)"
             cursor.execute(sql_clean_sessions, (user_id,))
             conn.commit()
             
             # 1. Haftalık toplam süre
-            sql_weekly_sum = "SELECT SUM(duration_minutes) AS total_minutes FROM study_sessions WHERE user_id = %s AND start_time >= %s"
+            sql_weekly_sum = "SELECT SUM(duration_minutes) AS total_minutes FROM study_sessions WHERE user_id = ? AND start_time >= ?"
             cursor.execute(sql_weekly_sum, (user_id, week_start_date))
             result = cursor.fetchone()
             if result and result['total_minutes']:
@@ -165,23 +163,23 @@ def dashboard():
                 weekly_remaining_minutes = weekly_total_minutes % 60
 
             # 2. Güncel plan
-            sql_plans = "SELECT * FROM weekly_plans WHERE user_id = %s AND week_start_date >= %s ORDER BY week_start_date DESC"
+            sql_plans = "SELECT * FROM weekly_plans WHERE user_id = ? AND week_start_date >= ? ORDER BY week_start_date DESC"
             cursor.execute(sql_plans, (user_id, week_start_date))
             active_plans = cursor.fetchall()
 
             # 3. Tüm seanslar
-            sql_all = "SELECT id, task_name, start_time, end_time, duration_minutes, notes FROM study_sessions WHERE user_id = %s ORDER BY start_time DESC"
+            sql_all = "SELECT id, task_name, start_time, end_time, duration_minutes, notes FROM study_sessions WHERE user_id = ? ORDER BY start_time DESC"
             cursor.execute(sql_all, (user_id,))
             study_sessions_list = cursor.fetchall()
 
             # 4. Grafik Verisi
-            sql_chart_data = "SELECT task_name AS kategori, SUM(duration_minutes) AS sure FROM study_sessions WHERE user_id = %s GROUP BY task_name ORDER BY sure DESC"
+            sql_chart_data = "SELECT task_name AS kategori, SUM(duration_minutes) AS sure FROM study_sessions WHERE user_id = ? GROUP BY task_name ORDER BY sure DESC"
             cursor.execute(sql_chart_data, (user_id,))
             chart_data_from_db = cursor.fetchall()
             grafik_verisi = [{"kategori": row["kategori"], "süre": int(row["sure"])} for row in chart_data_from_db if row["sure"] > 0]
 
             # 5. Toplam Tamamlanan Görev
-            sql_kanban_count = "SELECT COUNT(*) as completed_count FROM kanban_tasks WHERE user_id = %s AND status = 'DONE'"
+            sql_kanban_count = "SELECT COUNT(*) as completed_count FROM kanban_tasks WHERE user_id = ? AND status = 'DONE'"
             cursor.execute(sql_kanban_count, (user_id,))
             kanban_result = cursor.fetchone()
             total_completed_tasks = kanban_result['completed_count'] if kanban_result else 0
@@ -190,7 +188,7 @@ def dashboard():
             sql_kanban_chart = """
                 SELECT DATE(completed_at) as gun, COUNT(*) as sayi 
                 FROM kanban_tasks 
-                WHERE user_id = %s AND status = 'DONE' AND completed_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+                WHERE user_id = ? AND status = 'DONE' AND completed_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
                 GROUP BY DATE(completed_at)
                 ORDER BY gun ASC
             """
@@ -200,7 +198,7 @@ def dashboard():
             kanban_counts = [row['sayi'] for row in kanban_chart_rows]
 
             # --- 7. RÜTBE HESAPLAMA ---
-            cursor.execute("SELECT SUM(duration_minutes) as total FROM study_sessions WHERE user_id = %s", (user_id,))
+            cursor.execute("SELECT SUM(duration_minutes) as total FROM study_sessions WHERE user_id = ?", (user_id,))
             res_total = cursor.fetchone()
             total_hours_worked = 0
             if res_total and res_total['total']:
@@ -219,7 +217,7 @@ def dashboard():
                 user_rank = "Yola Çıkan 🥉"
                 rank_color = "#CD7F32" # Bronz
 
-    except pymysql.Error as e:
+    except sqlite3.Error as e:
         flash(f"Veritabanı hatası: {e}", "error")
     
     DEFAULT_WEEKLY_GOAL_MINUTES = 15 * 60
@@ -265,12 +263,12 @@ def add_session():
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                sql = "INSERT INTO study_sessions (user_id, task_name, start_time, end_time, duration_minutes, notes) VALUES (%s,%s,%s,%s,%s,%s)"
+                sql = "INSERT INTO study_sessions (user_id, task_name, start_time, end_time, duration_minutes, notes) VALUES (?,?,?,?,?,?)"
                 cursor.execute(sql, (user_id, task_name, start_time, end_time, duration_minutes, notes))
                 conn.commit()
             flash("Çalışma seansı başarıyla kaydedildi!", "success")
             return redirect(url_for('dashboard'))
-        except pymysql.Error as e:
+        except sqlite3.Error as e:
             return f"Veritabanı hatası: {e}", 500
         except Exception as e:
             return f"Beklenmedik hata: {e}", 500
@@ -291,11 +289,11 @@ def plan_week():
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                sql = "INSERT INTO weekly_plans (user_id, week_start_date, goals, is_completed) VALUES (%s, %s, %s, FALSE)"
+                sql = "INSERT INTO weekly_plans (user_id, week_start_date, goals, is_completed) VALUES (?,?,?,0)"
                 cursor.execute(sql, (user_id, next_monday, goals))
                 conn.commit()
             return redirect(url_for('dashboard'))
-        except pymysql.Error as e:
+        except sqlite3.Error as e:
             return f"Veritabanı hatası: {e}", 500
         except Exception as e:
             return f"Beklenmedik hata: {e}", 500
@@ -326,10 +324,10 @@ def kanban_board():
             # Mantık: Durumu 'DONE' olmayanları getir VEYA Durumu 'DONE' olup bitiş saati son 24 saat içinde olanları getir.
             sql = """
                 SELECT * FROM kanban_tasks 
-                WHERE user_id = %s 
+                WHERE user_id = ?
                 AND (
                     status != 'DONE' 
-                    OR (status = 'DONE' AND completed_at > DATE_SUB(NOW(), INTERVAL 1 DAY))
+                    OR (status = 'DONE' AND completed_at > datetiem('now2, '-1 day'))
                 )
                 ORDER BY created_at DESC
             """
@@ -357,7 +355,7 @@ def add_task():
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            sql = "INSERT INTO kanban_tasks (user_id, title, description, status, priority) VALUES (%s, %s, %s, %s, %s)"
+            sql = "INSERT INTO kanban_tasks (user_id, title, description, status, priority) VALUES (?, ?, ?, ?, ?)"
             cursor.execute(sql, (user_id, title, description, status, priority))
             conn.commit()
             
@@ -395,9 +393,9 @@ def update_task_status():
             cursor = conn.cursor()
             
             if new_status == 'DONE':
-                sql = "UPDATE kanban_tasks SET status = %s, completed_at = NOW() WHERE id = %s AND user_id = %s"
+                sql = "UPDATE kanban_tasks SET status = ?, completed_at = NOW() WHERE id = ? AND user_id = ?"
             else:
-                sql = "UPDATE kanban_tasks SET status = %s, completed_at = NULL WHERE id = %s AND user_id = %s"
+                sql = "UPDATE kanban_tasks SET status = ?, completed_at = NULL WHERE id = ? AND user_id = ?"
             
             cursor.execute(sql, (new_status, task_id, user_id))
             conn.commit()
@@ -415,8 +413,8 @@ def update_task_status():
 @login_required
 def edit_session(session_id):
     with get_db_connection() as conn:
-        cursor = conn.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("SELECT * FROM study_sessions WHERE id = %s AND user_id = %s", (session_id, session['user_id']))
+        cursor = conn.cursor(sqlite3.cursors.DictCursor)
+        cursor.execute("SELECT * FROM study_sessions WHERE id = ? AND user_id = ?", (session_id, session['user_id']))
         session_data = cursor.fetchone()
         if not session_data:
             flash("Seans bulunamadı veya yetkiniz yok.", "error")
@@ -432,7 +430,7 @@ def edit_session(session_id):
                     flash("Bitiş saati, başlangıç saatinden sonra olmalıdır.", "error")
                     session_data.update(request.form)
                     return render_template('edit_session.html', study_session=session_data)
-                sql = "UPDATE study_sessions SET task_name=%s, start_time=%s, end_time=%s, duration_minutes=%s, notes=%s WHERE id=%s AND user_id=%s"
+                sql = "UPDATE study_sessions SET task_name=?, start_time=?, end_time=?, duration_minutes=?, notes=? WHERE id=? AND user_id=?"
                 cursor.execute(sql, (task_name, start_time, end_time, duration_minutes, request.form.get('notes',''), session_id, session['user_id']))
                 conn.commit()
                 flash("Çalışma seansı başarıyla güncellendi!", "success")
@@ -453,7 +451,7 @@ def edit_session(session_id):
 def delete_session(session_id):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM study_sessions WHERE id = %s AND user_id = %s", (session_id, session['user_id']))
+        cursor.execute("DELETE FROM study_sessions WHERE id = ? AND user_id = ?", (session_id, session['user_id']))
         conn.commit()
         flash("Seans silindi." if cursor.rowcount>0 else "Seans bulunamadı veya yetkiniz yok.", "success" if cursor.rowcount>0 else "error")
     return redirect(url_for('dashboard'))
@@ -469,14 +467,14 @@ def completed_tasks():
             cursor = conn.cursor()
             
             # 1. TEMİZLİK
-            sql_cleanup = "DELETE FROM kanban_tasks WHERE user_id = %s AND status = 'DONE' AND completed_at < DATE_SUB(NOW(), INTERVAL 30 DAY)"
+            sql_cleanup = "DELETE FROM kanban_tasks WHERE user_id = ? AND status = 'DONE' AND completed_at < DATE_SUB(NOW(), INTERVAL 30 DAY)"
             cursor.execute(sql_cleanup, (user_id,))
             conn.commit()
 
             # 2. LİSTELEME
             sql_history = """
                 SELECT * FROM kanban_tasks 
-                WHERE user_id = %s 
+                WHERE user_id = ?
                 AND status = 'DONE' 
                 AND completed_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
                 ORDER BY completed_at DESC
